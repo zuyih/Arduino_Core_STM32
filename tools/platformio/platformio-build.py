@@ -45,6 +45,14 @@ variant = board_config.get(
     "build.variant", board_config.get("build.arduino.variant", "generic")
 )
 series = mcu_type[:7].upper() + "xx"
+# Series shipping the second generation HAL (STM32C5 and later) are selected
+# with USE_HALV2_DRIVER, which is `build.hal` in boards.txt. Detect it from the
+# driver layout so new HALv2 series are picked up without touching this script.
+is_halv2 = isfile(
+    join(
+        FRAMEWORK_DIR, "system", "Drivers", series + "_HAL_Driver", "Inc", "stm32_hal.h"
+    )
+)
 variants_dir = (
     join(env.subst("$PROJECT_DIR"), board_config.get("build.variants_dir"))
     if board_config.get("build.variants_dir", "")
@@ -208,19 +216,19 @@ def get_arduino_board_id(board_config, mcu):
 
 
 board_id = get_arduino_board_id(board_config, mcu)
+cpu = board_config.get("build.cpu")
 machine_flags = [
-    "-mcpu=%s" % board_config.get("build.cpu"),
+    "-mcpu=%s" % cpu,
     "-mthumb",
 ]
 
-if (
-    any(
-        cpu in board_config.get("build.cpu")
-        for cpu in ("cortex-m33", "cortex-m4", "cortex-m7")
-    )
-    and "stm32wl" not in mcu
-):
-    machine_flags.extend(["-mfpu=fpv4-sp-d16", "-mfloat-abi=hard"])
+# Mirrors `build.fpu` from boards.txt: Cortex-M4 has FPv4-SP, Cortex-M7 and
+# Cortex-M33 have FPv5-SP. STM32WL parts ship without an FPU.
+if "stm32wl" not in mcu:
+    if "cortex-m4" in cpu:
+        machine_flags.extend(["-mfpu=fpv4-sp-d16", "-mfloat-abi=hard"])
+    elif any(c in cpu for c in ("cortex-m7", "cortex-m33")):
+        machine_flags.extend(["-mfpu=fpv5-sp-d16", "-mfloat-abi=hard"])
 
 env.Append(
     ASFLAGS=machine_flags,
@@ -253,8 +261,11 @@ env.Append(
         "ARDUINO_%s" % board_id,
         ("BOARD_NAME", '\\"%s\\"' % board_id),
         "HAL_UART_MODULE_ENABLED",
-        "USE_HAL_DRIVER",
-        "USE_FULL_LL_DRIVER",
+        *(
+            ["USE_HALV2_DRIVER"]
+            if is_halv2
+            else ["USE_HAL_DRIVER", "USE_FULL_LL_DRIVER"]
+        ),
         "EXTENDED_PIN_MODE",
         (
             "VARIANT_H",
@@ -338,6 +349,18 @@ env.Append(
             "Source",
             "Templates",
             "gcc",
+        ),
+        # HALv2 series keep the startup_stm32*.c files directly under Source/
+        # instead of Source/Templates/gcc/.
+        join(
+            FRAMEWORK_DIR,
+            "system",
+            "Drivers",
+            "CMSIS",
+            "Device",
+            "ST",
+            series,
+            "Source",
         ),
         join(CMSIS_DIR, "DSP", "Include"),
         join(CMSIS_DIR, "DSP", "PrivateInclude"),
